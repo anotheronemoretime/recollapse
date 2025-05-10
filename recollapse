@@ -7,7 +7,7 @@ import string
 import sys
 import urllib.parse
 import warnings
-from typing import ClassVar, Optional
+from typing import ClassVar, Optional, List
 
 import unidecode
 from prettytable import PrettyTable
@@ -29,6 +29,7 @@ class Recollapse:
     MODE_NORM = 3
     MODE_TERM = 4
     MODE_RE_META = 5
+    MODE_OVERLONG = 6
 
     REGEX_METACHARS = ".^$*+-?()[]{}\\|"
 
@@ -54,6 +55,18 @@ class Recollapse:
         self.normtable = normtable
         self.alphanum = alphanum
         self.maxnorm = maxnorm
+
+    def generate_utf8_overlong(self, char: str) -> List[bytes]:
+        code_point = ord(char)
+        if code_point < 0x80:  # ASCII
+            # 2 octets: 110xxxxx 10xxxxxx
+            two_bytes = bytes([0xC0 | (code_point >> 6), 0x80 | (code_point & 0x3F)])
+            # 3 octets: 1110xxxx 10xxxxxx 10xxxxxx
+            three_bytes = bytes([0xE0 | (code_point >> 12), 0x80 | ((code_point >> 6) & 0x3F), 0x80 | (code_point & 0x3F)])
+            # 4 octets: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+            four_bytes = bytes([0xF0 | (code_point >> 18), 0x80 | ((code_point >> 12) & 0x3F), 0x80 | ((code_point >> 6) & 0x3F), 0x80 | (code_point & 0x3F)])
+            return [two_bytes, three_bytes, four_bytes]
+        return []
 
     def run(self) -> None:
         if self.normtable:
@@ -103,6 +116,13 @@ class Recollapse:
                     if c in self.REGEX_METACHARS:
                         for t in itertools.product(fuzzing_range, repeat=self.size):
                             self.generate(t, i, replace=True)
+
+            if self.MODE_OVERLONG in self.positions:
+                for i in range(len(self.current_input)):
+                    c = self.current_input[i]
+                    overlong_reprs = self.generate_utf8_overlong(c)
+                    for repr_bytes in overlong_reprs:
+                        self.generate(tuple(repr_bytes), i, replace=True)
 
         print("\n".join(sorted(set(self.output))))
 
@@ -175,7 +195,7 @@ class Recollapse:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="REcollapse is a helper tool for black-box regex fuzzing to bypass validations and discover normalizations in web applications")
 
-    parser.add_argument("-p", "--positions", help="pivot position modes. Example: 1,2,3,4,5 (default). 1: starting, 2: separator, 3: normalization, 4: termination, 5: regex metacharacters", required=False, default="1,2,3,4,5", type=str)
+    parser.add_argument("-p", "--positions", help="pivot position modes. Example: 1,2,3,4,5,6 (default). 1: starting, 2: separator, 3: normalization, 4: termination, 5: regex metacharacters, 6: UTF-8 overlong", required=False, default="1,2,3,4,5,6", type=str)
     parser.add_argument("-e", "--encoding", help="1: URL-encoded format (default), 2: Unicode format, 3: Raw format, 4: Double URL-encoded format", required=False, default=1, type=int, choices=range(1, 5))
     parser.add_argument("-r", "--range", help="range of bytes for fuzzing. Example: 0,0xff (default)", required=False, default="0,0xff", type=str)
     parser.add_argument("-s", "--size", help="number of fuzzing bytes (default: 1)", required=False, default=1)
@@ -212,7 +232,7 @@ def parse_args() -> argparse.Namespace:
             sys.exit(1)
 
         for p in args.positions:
-            if not 0 < p <= 5:
+            if not 0 < p <= 6:
                 print("Invalid positions provided")
                 sys.exit(1)
 
